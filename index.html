@@ -199,6 +199,12 @@ var supabaseClient = (typeof window!=='undefined' && window.supabase && window.s
 var session = null; /* session Supabase courante, ou null si non connecté */
 var authBusy = false;
 var authNotice = '';
+var ADMIN_EMAIL = 'ibrahimbaraia125@gmail.com';
+function isAdmin(){ return !!(session && session.user && session.user.email === ADMIN_EMAIL); }
+var adminOpen = false;
+var adminUsers = null; /* null = pas encore chargé, [] = chargé et vide, tableau = chargé */
+var adminBusy = false;
+var adminError = '';
 
 /* ================= DATA ================= */
 var SPORTS = [
@@ -434,7 +440,7 @@ function queueCloudSync(s, immediate){
   if(!supabaseClient || !session) return;
   if(cloudSyncTimer){ clearTimeout(cloudSyncTimer); cloudSyncTimer=null; }
   var run = function(){
-    supabaseClient.from('profiles').upsert({ id: session.user.id, data: s }).then(function(res){
+    supabaseClient.from('profiles').upsert({ id: session.user.id, email: session.user.email, data: s }).then(function(res){
       if(res && res.error){ authNotice = 'La sauvegarde en ligne a échoué : tes données restent sur cet appareil.'; render(); }
     }).catch(function(){});
   };
@@ -473,6 +479,86 @@ function sendMagicLink(email){
 function signOutAccount(){
   if(!supabaseClient) return Promise.resolve();
   return supabaseClient.auth.signOut().catch(function(){});
+}
+
+/* ================= ADMIN — vue d'ensemble ================= */
+function loadAdminUsers(){
+  if(!supabaseClient || !isAdmin()) return;
+  adminBusy = true; adminError=''; render();
+  supabaseClient.from('profiles').select('id,email,data,created_at,updated_at').order('updated_at', {ascending:false}).then(function(res){
+    adminBusy = false;
+    if(res.error){ adminError = 'Impossible de charger la liste : '+res.error.message; adminUsers = adminUsers || []; }
+    else adminUsers = res.data || [];
+    render();
+  }).catch(function(err){
+    adminBusy = false; adminError = 'Impossible de charger la liste.'; adminUsers = adminUsers || []; render();
+  });
+}
+function openAdminDashboard(){ adminOpen = true; if(adminUsers===null) loadAdminUsers(); render(); }
+function timeAgoFr(iso){
+  if(!iso) return '—';
+  var ms = Date.now() - new Date(iso).getTime();
+  var min = Math.floor(ms/60000);
+  if(min<1) return 'à l’instant';
+  if(min<60) return 'il y a '+min+' min';
+  var h = Math.floor(min/60);
+  if(h<24) return 'il y a '+h+' h';
+  var d = Math.floor(h/24);
+  if(d<30) return 'il y a '+d+' j';
+  return new Date(iso).toLocaleDateString('fr-FR', {day:'2-digit', month:'short', year:'numeric'});
+}
+function renderAdminDashboard(){
+  var back=h('div','sheet-backdrop');
+  back.onclick=function(e){ if(e.target===back){ adminOpen=false; render(); } };
+  var sheet=h('div','sheet'); sheet.style.maxHeight='92vh';
+  var head=h('div','sheet-head');
+  head.innerHTML='<div style="flex:1"><div style="font-weight:800;font-size:15px">Tableau de bord</div><div class="muted small">Visible uniquement par toi</div></div>';
+  var refresh=h('button','icon-btn', icon('refresh')); refresh.onclick=function(){ loadAdminUsers(); };
+  var close=h('button','icon-btn', icon('close')); close.onclick=function(){ adminOpen=false; render(); };
+  head.appendChild(refresh); head.appendChild(close);
+  sheet.appendChild(head);
+
+  var body=h('div','sheet-body');
+  if(adminBusy && adminUsers===null){ body.appendChild(h('p','muted small','Chargement…')); }
+  if(adminError){ body.appendChild(h('p','small', adminError)); }
+  var users = adminUsers || [];
+
+  var now7 = Date.now() - 7*86400000;
+  var activeWeek = users.filter(function(u){ return u.updated_at && new Date(u.updated_at).getTime()>now7; }).length;
+  var stats=h('div','row row-wrap'); stats.style.marginBottom='4px';
+  [['Inscrits', users.length], ['Actifs cette semaine', activeWeek]].forEach(function(st){
+    var tile=h('div','card'); tile.style.flex='1'; tile.style.padding='14px'; tile.style.minWidth='130px';
+    tile.innerHTML='<div class="eyebrow">'+st[0]+'</div><div class="disp tabular" style="font-size:26px">'+st[1]+'</div>';
+    stats.appendChild(tile);
+  });
+  body.appendChild(stats);
+
+  users.forEach(function(u){
+    var p = (u.data && u.data.profile) || null;
+    var card=h('div','card stack'); card.style.padding='14px';
+    var top=h('div','between');
+    top.innerHTML='<div style="font-weight:800;font-size:13.5px;overflow-wrap:anywhere">'+(u.email||'(e-mail inconnu)')+'</div>';
+    top.appendChild(h('span','pill pill-line', 'vu '+timeAgoFr(u.updated_at)));
+    card.appendChild(top);
+    if(p){
+      var sportLabel = sportsLabelOf(p.sports||[], p.otherSportName);
+      var objLabel = objectivesLabelOf(p.sports||[], p.objectives||{}, p.otherSportName);
+      card.appendChild(h('p','small', (sportLabel||'—')+(objLabel?' · '+objLabel:'')));
+      var doneCount = u.data.completion ? Object.keys(u.data.completion).filter(function(k){return u.data.completion[k];}).length : 0;
+      card.appendChild(h('p','muted small', 'Niveau '+((LEVELS.filter(function(l){return l.id===p.level;})[0]||{}).label||'—')+' · '+doneCount+' séance(s) cochée(s) · inscrit '+timeAgoFr(u.created_at)));
+    } else {
+      card.appendChild(h('p','muted small','Compte créé, pas encore de profil enregistré.'));
+    }
+    card.appendChild(h('div','hr'));
+    card.appendChild(h('div','between','<span class="eyebrow">Paiement</span><span class="pill pill-line">Gratuit — pas encore activé</span>'));
+    body.appendChild(card);
+  });
+
+  if(!adminBusy && users.length===0 && !adminError){ body.appendChild(h('p','muted small','Personne ne s’est encore inscrit.')); }
+
+  sheet.appendChild(body);
+  back.appendChild(sheet);
+  return back;
 }
 
 /* ================= PLAN GENERATOR ================= */
@@ -835,6 +921,7 @@ function render(){
   app.appendChild(renderTabbar());
   if(aiOpen) app.appendChild(renderAiSheet());
   if(voiceSession) app.appendChild(renderVoiceSheet());
+  if(adminOpen && isAdmin()) app.appendChild(renderAdminDashboard());
 }
 
 function h(tag, cls, html){
@@ -1304,6 +1391,11 @@ function renderProfileTab(){
   if(session){
     acc.appendChild(h('p','small','Connecté : '+session.user.email));
     acc.appendChild(h('p','muted small','Ton profil est sauvegardé en ligne : reconnecte-toi avec le même e-mail sur un autre téléphone pour le retrouver.'));
+    if(isAdmin()){
+      var dash=h('button','btn btn-primary btn-sm', icon('users')+' Tableau de bord');
+      dash.onclick=function(){ openAdminDashboard(); };
+      acc.appendChild(dash);
+    }
     var out=h('button','btn btn-ghost btn-sm','Se déconnecter');
     out.onclick=function(){ signOutAccount(); };
     acc.appendChild(out);
